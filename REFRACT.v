@@ -13,14 +13,40 @@ module REFRACT(
 wire  [3:0]  cnt_x;
 wire  [3:0]  cnt_y;
 wire CALC_DONE;
+wire DONE_1;
+reg DONE_buf1,DONE_buf2,DONE_buf3,DONE_buf4,DONE_buf5,DONE_buf6,DONE_buf7,DONE_buf8;
 COUNTER_XY counter_inst (
     .CLK(CLK),
     .RST(RST),
     .cnt_x(cnt_x),
     .cnt_y(cnt_y),
     .CALC_DONE(CALC_DONE),
-    .finish(DONE)
+    .finish(DONE_1)
 );
+
+always @(posedge CLK or posedge RST) begin
+    if(RST) begin
+        DONE_buf1 <= 0;
+        DONE_buf2 <= 0;
+        DONE_buf3 <= 0;
+        DONE_buf4 <= 0;
+        DONE_buf5 <= 0;
+        DONE_buf6 <= 0;
+        DONE_buf7 <= 0;
+        DONE_buf8 <= 0;
+    end
+    else begin
+        DONE_buf1 <= DONE_1;
+        DONE_buf2 <= DONE_buf1;
+        DONE_buf3 <= DONE_buf2;
+        DONE_buf4 <= DONE_buf3;
+        DONE_buf5 <= DONE_buf4;
+        DONE_buf6 <= DONE_buf5;
+        DONE_buf7 <= DONE_buf6;
+        DONE_buf8 <= DONE_buf7;
+    end
+end
+assign DONE = DONE_buf8;
 
 COUNTER_ONE_SHOT counter_one_shot_inst (
     .CLK(CLK),

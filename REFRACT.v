@@ -181,6 +181,7 @@ reg [32:0] z_gx; //Q5.12 * Q4.12 = Q10.24
 reg [32:0] z_gy; //Q5.12 * Q4.12 = Q10.24 
 reg [32:0] z_gx_buf; //Q5.12 * Q4.12 = Q10.24
 reg [32:0] z_gy_buf; //Q5.12 * Q4.12 = Q10.24 
+
 always @(posedge CLK or posedge RST) begin
     if(RST) begin
         z_gx <= 33'd0;
@@ -219,29 +220,40 @@ always @(posedge CLK or posedge RST) begin
     end
 end
 
-reg signed [31:0] zx, zy; 
 
-// M(Q15.12) * z_gx(Q10.24) = Q25.36
-wire signed [59:0] full_p_x = $signed(M) * $signed(z_gx_buf);
-wire signed [59:0] full_p_y = $signed(M) * $signed(z_gy_buf);
+// =========================================================================
+// 18-bit 精準優化版本：針對 RI=2 強化小數精度
+// =========================================================================
 
-// 為了對齊到 Q8.24，右移 12 位 (36 - 24 = 12)
-wire signed [31:0] offset_x = full_p_x >>> 12; 
-wire signed [31:0] offset_y = full_p_y >>> 12;
+// 1. 重新擷取位元：保留更多小數 (Fraction)，捨棄多餘整數
+// M (Q15.12) -> 取 [17:0]，包含 6 位整數, 12 位小數
+wire signed [17:0] M_short    = M[17:0]; 
+
+// z_gx_buf (Q10.24) -> 取 [29:12]，包含 6 位整數, 12 位小數
+wire signed [17:0] z_gx_short = $signed(z_gx_buf[29:12]);
+wire signed [17:0] z_gy_short = $signed(z_gy_buf[29:12]);
+
+// 2. 執行 18x18 具號乘法 (結果為 36-bit)
+// 小數位相加：12 (M) + 12 (zgx) = 24 位小數
+wire signed [35:0] p_x_36 = M_short * z_gx_short; // 此結果剛好是 Q12.24
+wire signed [35:0] p_y_36 = M_short * z_gy_short; // 此結果剛好是 Q12.24
+
+// 3. 執行加法 (對齊到 Q8.24)
+reg signed [31:0] zx, zy;
 
 always @(posedge CLK or posedge RST) begin
     if(RST) begin
         zx <= 32'd0;
         zy <= 32'd0;
     end else begin
-        // 整數座標 x_d6 左移 24 位對齊 Q8.24
-        zx <= ($signed({28'd0, x_d6}) << 24) + offset_x;
-        zy <= ($signed({28'd0, y_d6}) << 24) + offset_y;
+        // 因為 p_x_36 已經是 Q.24，所以不用再移位，直接加！
+        // x_d6 是整數，左移 24 位對齊 Q.24
+        zx <= ($signed({28'd0, x_d6}) << 24) + p_x_36[31:0];
+        zy <= ($signed({28'd0, y_d6}) << 24) + p_y_36[31:0];
     end
 end
 
-// 輸出截取：從 Q8.24 轉回 Q4.12
-// [24+3 : 24-12] = [27:12]
+// 4. 輸出截取 (維持 Q4.12)
 wire [15:0] zx_out = zx[27:12]; 
 wire [15:0] zy_out = zy[27:12];
 reg  [15:0] zy_out_buf; // 將 zy 從 Q28.48 對齊回 Q4.12

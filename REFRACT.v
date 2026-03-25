@@ -210,13 +210,30 @@ wire signed [25:0] denominator = ($signed({10'd0, etaA_buf}) << 2) + ($signed({1
 
 // --- Step 3: M 計算 (維持 Q15.12) ---
 reg signed [26:0] M; 
+// =========================================================================
+// 22-bit 平衡優化版本：修正 RI=2 精度不足問題
+// =========================================================================
+
+// 1. 稍微放寬截斷，保留更多分母精度 (取 [25:4]，只截掉 4 bit)
+// 格式變為 22 bits (含符號位)
+wire signed [21:0] num_22 = numerator[25:4];
+wire signed [21:0] den_22 = denominator[25:4];
+
+// 2. 執行除法
+// 被除數左移 12 位（對應 Q12 格式）
+// 運算規模：34-bit / 22-bit (依然比原本的 38/26 小很多)
+reg signed [26:0] M_reg;
+
 always @(posedge CLK or posedge RST) begin
-    if(RST) M <= 0;
-    else begin
-        if (denominator != 0)
-            M <= ($signed({ {14{numerator[25]}}, numerator}) <<< 12) / $signed(denominator);
-        else
-            M <= 0;
+    if(RST) begin
+        M <= 27'd0;
+    end else begin
+        if (den_22 != 22'd0) begin
+            // 這裡的核心是：分母必須保留足夠的 Bit 才能穩定
+            M <= ($signed(num_22) <<< 12) / $signed(den_22);
+        end else begin
+            M <= 27'd0;
+        end
     end
 end
 

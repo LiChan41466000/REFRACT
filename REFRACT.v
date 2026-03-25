@@ -46,6 +46,7 @@ always @(posedge CLK or posedge RST) begin
         DONE_buf8 <= DONE_buf7;
     end
 end
+
 assign DONE = DONE_buf8;
 
 COUNTER_ONE_SHOT counter_one_shot_inst (
@@ -510,7 +511,7 @@ endmodule
 module power_8_14_pipelined #(
     parameter INT_W = 4,
     parameter FRAC_W = 12,
-    parameter KEEP_FRAC = 16 
+    parameter KEEP_FRAC = 12 
 )(
     input  wire                         clk,
     input  wire                         rst,

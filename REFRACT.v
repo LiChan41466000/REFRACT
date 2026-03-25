@@ -1,7 +1,7 @@
 
 
 
-
+`include "/usr/cad/synopsys/synthesis/2025.06/dw/sim_ver/DW_sqrt.v"
 module REFRACT(
     input  wire        CLK,
     input  wire        RST,
@@ -48,16 +48,45 @@ power_8_14_pipelined power_X (
 power_8_14_pipelined power_Y (
     .clk(CLK),
     .rst(RST),
-    .x_i(x_normalized), 
+    .x_i(y_normalized), 
     .x14_o(y14),    
     .x8_o(y8) 
 );
 
+// 建議定義：整數 4 bits + 小數 12 bits = 16 bits 基礎，但計算中擴展至 24 bits Q12.12
+wire [23:0] gx2 = {8'd0, x14} << 2; // gx^2 = 4 * x^14
+wire [23:0] gy2 = {8'd0, y14} << 2; // gy^2 = 4 * y^14
+
+// g2 = gx^2 + gy^2 + 1
+// 注意：1 在 Q4.12 格式下是 24'h001000
+//So call A = g2_minus1 Q12.12
+wire [23:0] g2_minus1 = gx2 + gy2 ; 
+wire [23:0] g2 = g2_minus1 + 24'h001000;
+// 保留 16 位小數 (Q8.16)，寬度 24 bits
+wire [23:0] eta2 = (eta * eta) >>> 8;
+
+//eta2A
+reg [47:0] eta2A; //eta平方乘上A
+reg [27:0] etaA; //eta乘上A
+
+always @(posedge CLK or posedge RST) begin
+    if(RST)
+        eta2A <= 0;
+        etaA <= 0;
+    else
+        eta2A <= (eta2 * g2_minus1) ; // eta * g2 後再右移 12 位元對齊小數部分 Q20.28
+        etaA <= (eta * g2_minus1) >>> 12 ; // eta * g2 後再右移 12 位元對齊小數部分 Q15.12
+end
+
+wire [47:0] kgg_q28 = ({24'd0, g2} << 16) - eta2A; //Q20.28
+
+DW_sqrt #(width,tc_mode) 
+        (.a(),
+         .root());
 
 
 
 endmodule
-
 
 
 

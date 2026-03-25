@@ -1,6 +1,3 @@
-
-
-
 `include "/usr/cad/synopsys/synthesis/2025.06/dw/sim_ver/DW_sqrt.v"
 module REFRACT(
     input  wire        CLK,
@@ -36,13 +33,15 @@ wire signed [15:0] x_normalized, y_normalized;
 coord_processor u_x_proc (.coord_i(cnt_x), .out_o(x_normalized));
 coord_processor u_y_proc (.coord_i(cnt_y), .out_o(y_normalized));
 
-wire [3:0] x_d7, y_d8,x_d6,y_d6; //buf座標
+wire [3:0] x_d7, y_d8,y_d7, x_d8,x_d6,y_d6; //buf座標
 COORD_DELAY coord_delay_inst (
     .clk(CLK),
     .rst(RST),
     .x_i(cnt_x),
     .y_i(cnt_y),
     .x_d7(x_d7),
+    .y_d7(y_d7),
+    .x_d8(x_d8),
     .y_d8(y_d8),
     .x_d6(x_d6),
     .y_d6(y_d6)
@@ -56,14 +55,15 @@ RI ri_inst (
     .eta_o(eta)
 );
 
-wire signed [15:0] y14, y8;
-wire signed [15:0] x14, x8;
+wire signed [15:0] y14, y8 ,y7;
+wire signed [15:0] x14, x8 ,x7;
 
 power_8_14_pipelined power_X (
     .clk(CLK),
     .rst(RST),
     .x_i(x_normalized), 
-    .x14_o(x14),    
+    .x14_o(x14),  
+    .x7_o(x7),  
     .x8_o(x8) 
 );
 
@@ -71,46 +71,46 @@ power_8_14_pipelined power_Y (
     .clk(CLK),
     .rst(RST),
     .x_i(y_normalized), 
-    .x14_o(y14),    
+    .x14_o(y14),     
+    .x7_o(y7),  
     .x8_o(y8) 
 );
 
-reg signed [15:0] x_norm_d1, x_norm_d2, x_norm_d3, x_norm_d4;
+//reg signed [15:0] x_norm_d1, x_norm_d2, x_norm_d3, x_norm_d4;
 
-always @(posedge CLK or posedge RST) begin
-    if (RST) begin
-        x_norm_d1 <= 16'd0;
-        x_norm_d2 <= 16'd0;
-        x_norm_d3 <= 16'd0;
-        x_norm_d4 <= 16'd0;
-    end else begin
-        x_norm_d1 <= x_normalized; // 延遲 1 拍
-        x_norm_d2 <= x_norm_d1;     // 延遲 2 拍
-        x_norm_d3 <= x_norm_d2;     // 延遲 3 拍
-        x_norm_d4 <= x_norm_d3;     // 延遲 4 拍
-    end
-end
-reg signed [15:0] y_norm_d1, y_norm_d2, y_norm_d3, y_norm_d4;
-always @(posedge CLK or posedge RST) begin
-    if (RST) begin
-        y_norm_d1 <= 16'd0;
-        y_norm_d2 <= 16'd0;
-        y_norm_d3 <= 16'd0;
-        y_norm_d4 <= 16'd0;
-    end else begin
-        y_norm_d1 <= y_normalized; // 延遲 1 拍
-        y_norm_d2 <= y_norm_d1;     // 延遲 2 拍
-        y_norm_d3 <= y_norm_d2;     // 延遲 3 拍
-        y_norm_d4 <= y_norm_d3;     // 延遲 4 拍
-    end
-end
+//always @(posedge CLK or posedge RST) begin
+//    if (RST) begin
+//        x_norm_d1 <= 16'd0;
+//        x_norm_d2 <= 16'd0;
+//        x_norm_d3 <= 16'd0;
+//        x_norm_d4 <= 16'd0;
+//    end else begin
+//        x_norm_d1 <= x_normalized; // 延遲 1 拍
+//        x_norm_d2 <= x_norm_d1;     // 延遲 2 拍
+//        x_norm_d3 <= x_norm_d2;     // 延遲 3 拍
+//        x_norm_d4 <= x_norm_d3;     // 延遲 4 拍
+//    end
+//end
+//reg signed [15:0] y_norm_d1, y_norm_d2, y_norm_d3, y_norm_d4;
+//always @(posedge CLK or posedge RST) begin
+//    if (RST) begin
+//        y_norm_d1 <= 16'd0;
+//        y_norm_d2 <= 16'd0;
+//        y_norm_d3 <= 16'd0;
+//        y_norm_d4 <= 16'd0;
+//    end else begin
+//        y_norm_d1 <= y_normalized; // 延遲 1 拍
+//        y_norm_d2 <= y_norm_d1;     // 延遲 2 拍
+//        y_norm_d3 <= y_norm_d2;     // 延遲 3 拍
+//        y_norm_d4 <= y_norm_d3;     // 延遲 4 拍
+//    end
+//end
 // 此時 x_norm_d4 會與 power_X 輸出的 x8_o, x14_o 同步
 
 
 // 建議定義：整數 4 bits + 小數 12 bits = 16 bits 基礎，但計算中擴展至 24 bits Q12.12
 wire [23:0] gx2 = {8'd0, x14} << 2; // gx^2 = 4 * x^14
 wire [23:0] gy2 = {8'd0, y14} << 2; // gy^2 = 4 * y^14
-
 // g2 = gx^2 + gy^2 + 1
 // 注意：1 在 Q4.12 格式下是 24'h001000
 //So call A = g2_minus1 Q12.12
@@ -138,7 +138,19 @@ end
 
 
 
-wire [47:0] kgg = ({24'd0, g2} << 16) - eta2A; //Q20.28
+reg [23:0] g2_d1; // 增加一階暫存器
+
+always @(posedge CLK or posedge RST) begin
+    if(RST)
+        g2_d1 <= 24'd0;
+    else
+        g2_d1 <= g2; // 將組合電路的 g2 延遲一拍以對齊 eta2A
+end
+
+// 修改後的 kgg 計算
+// 現在 g2_d1 與 eta2A 都是針對同一個座標點的運算結果
+wire [47:0] kgg = ({24'd0, g2_d1} << 16) - eta2A;
+
 
 localparam width = 48;
 localparam tc_mode = 0;
@@ -156,64 +168,107 @@ DW_sqrt #(width,tc_mode)
                     .root(sqrt_kgg));
 
 //Z
-reg [16:0] z; //Q5.12
+reg signed [16:0] z; //Q5.12
 always @(posedge CLK or posedge RST) begin
     if(RST)
         z <= 17'd0;
     else
-        z <= 17'd6 - ({1'd0, x8} << 1) - ({1'd0, y8} << 1) ; 
+        z <= (17'sd6 << 12) - ($signed({1'b0, x8}) <<< 1) - ($signed({1'b0, y8}) <<< 1);
 end
 
 
 //x7 y7 
-reg signed [15:0] y7;
-reg signed [15:0] x7;
+//reg signed [15:0] y7;
+//reg signed [15:0] x7;
+//always @(posedge CLK or posedge RST) begin
+//    if(RST) begin
+//        x7 <= 16'd0;
+//        y7 <= 16'd0;
+//    end else begin
+//        x7 <= (|x_norm_d4)?({12'd0,x8} << 12) / x_norm_d4: ; // Q5.12 * Q4.12 = Q9.12
+//        y7 <= (|y_norm_d4)?({12'd0,y8} << 12) / y_norm_d4: ; // Q5.12 * Q4.12 = Q9.12
+//    end
+//end
+
+//Z乘上gx gy/有改!!!!!!!!!
+reg [32:0] z_gx; //Q5.12 * Q4.12 = Q10.24
+reg [32:0] z_gy; //Q5.12 * Q4.12 = Q10.24 
+reg [32:0] z_gx_buf; //Q5.12 * Q4.12 = Q10.24
+reg [32:0] z_gy_buf; //Q5.12 * Q4.12 = Q10.24 
 always @(posedge CLK or posedge RST) begin
     if(RST) begin
-        x7 <= 16'd0;
-        y7 <= 16'd0;
+        z_gx <= 33'd0;
+        z_gy <= 33'd0;
     end else begin
-        x7 <= ({12'd0,x8} << 12) / x_norm_d4; // Q5.12 * Q4.12 = Q9.12
-        y7 <= ({12'd0,y8} << 12) / y_norm_d4; // Q5.12 * Q4.12 = Q9.12
+        z_gx <= (z * x7) <<< 1; // Q5.12 * Q4.12 = Q9.24
+        z_gy <= (z * y7) <<< 1; // Q5.12 * Q4.12 = Q9.24
     end
 end
 
-//Z乘上gx gy
-reg [31:0] z_gx; //Q5.12 * Q4.12 = Q9.24
-reg [31:0] z_gy; //Q5.12 * Q4.12 = Q9.24
 always @(posedge CLK or posedge RST) begin
     if(RST) begin
-        z_gx <= 0;
-        z_gy <= 0;
+        z_gx_buf <= 33'd0;
+        z_gy_buf <= 33'd0;
     end else begin
-        z_gx <= z * x7; // Q5.12 * Q4.12 = Q9.24
-        z_gy <= z * y7; // Q5.12 * Q4.12 = Q9.24
+        z_gx_buf <= z_gx; // Q5.12 * Q4.12 = Q9.24
+        z_gy_buf <= z_gy; // Q5.12 * Q4.12 = Q9.24
     end
 end
 
 //M
-reg [26:0] M;
+
+// 重新定義分母與分子，確保小數點對齊在第 14 位 (Q12.14)
+wire signed [25:0] numerator   = ($signed({10'd0, eta}) << 2) - $signed({2'd0, sqrt_kgg}); 
+wire signed [25:0] denominator = ($signed({10'd0, etaA_buf}) << 2) + $signed({2'd0, sqrt_kgg});
+
+
+
+// 將 M 宣告為具符號 (signed)，且擴大運算中間寬度
+reg signed [26:0] M; 
 always @(posedge CLK or posedge RST) begin
-    if(RST) begin
-        M <= 0;
-    end
+    if(RST) M <= 0;
     else begin
-        M <= (eta-sqrt_kgg) / (etaA_buf + sqrt_kgg); //Q15.12 / Q15.12 = Q15.12
+        if (denominator != 0)
+            // 強制使用 $signed 並擴展到 40 bit 進行運算，再存回 27 bit
+            M <= ($signed({ {14{numerator[25]}}, numerator}) <<< 12) / $signed(denominator);
+        else
+            M <= 0;
     end
 end
 
 
-
+/*
 // ZX ZY
-reg [72:0] zx,zy; //Q28.48
+
 always @(posedge CLK or posedge RST) begin
     if(RST) begin
         zx <= 0;
         zy <= 0;
     end
     else begin
-        zx <= ( {24'd0,x_d6}<<24 + M * z_gx); // 4.36+ Q15.12 * Q9.24 = Q25.48
-        zy <= ( {24'd0,y_d6}<<24 + M * z_gy); 
+        zx <= ($signed({68'd0, x_d6}) << 36) + $signed(M * z_gx_buf);
+        zy <= ($signed({68'd0, y_d6}) << 36) + $signed(M * z_gy_buf); 
+    end
+end
+*/
+reg signed [71:0] zx,zy; //Q36.36
+reg signed [32:0] z_gx_signed,z_gy_signed; 
+always @(*) z_gx_signed = $signed(z_gx_buf);
+always @(*) z_gy_signed = $signed(z_gy_buf);
+
+wire signed [59:0] product_x = $signed(M) * z_gx_signed; // Q25.36
+wire signed [59:0] product_y = $signed(M) * z_gy_signed; // Q25.36
+
+always @(posedge CLK or posedge RST) begin
+    if(RST) begin
+        zx <= 72'd0;
+        zy <= 72'd0;
+    end else begin
+        // 正確的對齊與加法：
+        // 將 4-bit 的 x_d6 先轉成 signed 72-bit，再位移
+        // 這樣能確保整數部分位在 Bit [39:36]
+        zx <= ( $signed({68'd0, x_d6}) << 36 ) + $signed({ {12{product_x[59]}}, product_x });
+        zy <= ( $signed({68'd0, y_d6}) << 36 ) + $signed({ {12{product_y[59]}}, product_y });
     end
 end
 
@@ -232,11 +287,68 @@ end
 
 assign SRAM_D = (CALC_DONE)?zx_out:zy_out_buf;
 
-assign SRAM_WE = 1'd1; // 持續寫入，SRAM 模組內部會根據地址決定是否真正寫入
+//assign SRAM_WE = 1'd1; // 持續寫入，SRAM 模組內部會根據地址決定是否真正寫入
 
-assign SRAM_A = (x_d7+ y_d8*16)*2 + CALC_DONE ; // 寫入 zx 時使用 x_d7, y_d8；寫入 zy 時使用 x_d6, y_d6
+COUNTER_WE we_counter_inst (
+    .CLK(CLK),
+    .RST(RST),
+    .SRAM_WE(SRAM_WE)
+);
+
+
+
+reg [8:0] SRAM_ctr;
+always @(posedge CLK or posedge RST ) begin
+    if(RST) begin
+        SRAM_ctr <=0;
+    end
+    else if(SRAM_WE) begin
+        SRAM_ctr <= SRAM_ctr + 9'd1;
+    end
+    else begin
+        SRAM_ctr <= SRAM_ctr;
+    end
+end
+
+
+assign SRAM_A = SRAM_ctr; // 寫入 zx 時使用 x_d7, y_d8；寫入 zy 時使用 x_d6, y_d6
 
 endmodule
+
+
+module COUNTER_WE (
+    input  wire CLK,
+    input  wire RST,
+    output reg  SRAM_WE
+);
+
+    reg [2:0] cnt;
+
+    always @(posedge CLK or posedge RST) begin
+        if (RST) begin
+            cnt     <= 3'd0;
+            SRAM_WE <= 1'b0;
+        end else begin
+            if(SRAM_WE == 0) begin
+                if (cnt == 3'd7) begin
+                // 數到 6 了，拉起 WE
+                SRAM_WE <= 1'b1;
+                // 這裡可以選擇讓計數器停在 6，或是繼續循環
+                cnt     <= cnt; 
+                end else begin
+                    cnt     <= cnt + 3'd1;
+                    SRAM_WE <= 1'b0;
+                end
+            end
+            else begin
+                SRAM_WE <= SRAM_WE;
+                cnt <= cnt+1;
+            end
+        end
+    end
+
+endmodule
+
 
 module COORD_DELAY (
     input  wire       clk,
@@ -244,6 +356,8 @@ module COORD_DELAY (
     input  wire [3:0] x_i,     // 來自 COUNTER_XY 的 cnt_x [cite: 68]
     input  wire [3:0] y_i,     // 來自 COUNTER_XY 的 cnt_y [cite: 68]
     output wire [3:0] x_d7,  // 延遲 10 拍後的 X
+    output wire [3:0] y_d7,  // 延遲 10 拍後的 X
+    output wire [3:0] x_d8,  // 延遲 10 拍後的 Y
     output wire [3:0] y_d8,  // 延遲 10 拍後的 Y
     output wire [3:0] x_d6,
     output wire [3:0] y_d6
@@ -256,7 +370,7 @@ module COORD_DELAY (
 
     always @(posedge clk or posedge rst) begin
         if (rst) begin
-            for (i = 0; i < 8; i = i + 1) begin
+            for (i = 0; i <= 8; i = i + 1) begin
                 x_pipe[i] <= 4'd0;
                 y_pipe[i] <= 4'd0;
             end
@@ -266,7 +380,7 @@ module COORD_DELAY (
             y_pipe[0] <= y_i;
             
             // 後續每一階接前一階 (Shift Logic)
-            for (i = 1; i < 8; i = i + 1) begin
+            for (i = 1; i <= 8; i = i + 1) begin
                 x_pipe[i] <= x_pipe[i-1];
                 y_pipe[i] <= y_pipe[i-1];
             end
@@ -277,6 +391,8 @@ module COORD_DELAY (
     assign x_d6 = x_pipe[6];
     assign y_d6 = y_pipe[6];
     assign x_d7 = x_pipe[7];
+    assign y_d7 = y_pipe[7];
+    assign x_d8 = x_pipe[8];
     assign y_d8 = y_pipe[8];
 
 endmodule
@@ -290,7 +406,6 @@ module COUNTER_XY(
     output reg         finish
 );
 
-reg [3:0] cnt_x, cnt_y; // 4-bit 可以跑 0~15
 
 // 當運算完成一條光線並寫入 SRAM 後
 always @(posedge CLK or posedge RST) begin
@@ -324,7 +439,7 @@ module COUNTER_ONE_SHOT(
 
  always @(posedge CLK or posedge RST) begin
     if(RST) begin
-        ONE_SHOT_OUT <= 1'b0;
+        ONE_SHOT_OUT <= 1'b1;
     end else begin
         ONE_SHOT_OUT <= ONE_SHOT_OUT+1'b1; // 在第一個時鐘週期後持續輸出高電位
     end
@@ -399,6 +514,7 @@ module signed_mul_trunc #(
     parameter KEEP_FRAC = 16 // 每一級運算後保留的小數位數
 )(
     input  wire                         clk,
+    input  wire                         rst,
     input  wire signed [INT_W+FRAC_W-1:0] a_i,
     input  wire signed [INT_W+FRAC_W-1:0] b_i,
     output reg  signed [INT_W+KEEP_FRAC-1:0] out_o
@@ -408,11 +524,16 @@ module signed_mul_trunc #(
     localparam MUL_W = (INT_W + FRAC_W) * 2;
     wire signed [MUL_W-1:0] mul_res = a_i * b_i;
 
-    always @(posedge clk) begin
+    always @(posedge clk or  posedge rst) begin
         // 截斷邏輯：
         // 1. 捨棄過低精度的位元 (從原本的 FRAC_W*2 縮減回 KEEP_FRAC)
         // 2. 為了減少誤差，這裡建議加上 1/2 LSB 做四捨五入 (Rounding)
-        out_o <= (mul_res + (1 << (FRAC_W*2 - KEEP_FRAC - 1))) >>> (FRAC_W*2 - KEEP_FRAC);
+        if(rst) begin
+            out_o <= 0;
+        end 
+        else begin
+            out_o <= (mul_res + (1 << (FRAC_W*2 - KEEP_FRAC - 1))) >>> (FRAC_W*2 - KEEP_FRAC);
+        end
     end
 endmodule
 
@@ -423,64 +544,83 @@ module power_8_14_pipelined #(
 )(
     input  wire                         clk,
     input  wire                         rst,
-    input  wire signed [INT_W+FRAC_W-1:0] x_i,     // 輸入 (X-8)/8
-    output wire signed [INT_W+FRAC_W-1:0] x8_o,    // 輸出 (X-8)/8 ^ 8
-    output wire signed [INT_W+FRAC_W-1:0] x14_o    // 輸出 (X-8)/8 ^ 14
+    input  wire signed [INT_W+FRAC_W-1:0] x_i,     // 輸入 (X-8)/8 (Latency 0)
+    output wire signed [INT_W+FRAC_W-1:0] x8_o,    // 輸出 ^8  (Latency 4)
+    output wire signed [INT_W+FRAC_W-1:0] x14_o,   // 輸出 ^14 (Latency 4)
+    output wire signed [INT_W+FRAC_W-1:0] x7_o     // 輸出 ^7  (Latency 5)
 );
 
-    // --- 內部連線 ---
+    // --- 內部連線與暫存器 ---
     wire signed [INT_W+KEEP_FRAC-1:0] x1_in;
-    wire signed [INT_W+KEEP_FRAC-1:0] x2, x4, x6, x8, x14;
+    wire signed [INT_W+KEEP_FRAC-1:0] x2, x4, x6, x8, x14, x7;
     
-    // 輸入轉精度
+    // 精度轉換：將輸入擴展至運算精度 (Q4.12 -> Q4.16)
     assign x1_in = (KEEP_FRAC > FRAC_W) ? (x_i <<< (KEEP_FRAC - FRAC_W)) : x_i;
 
-    // --- 延遲對齊暫存器 ---
-    reg signed [INT_W+KEEP_FRAC-1:0] x2_d1;
-    reg signed [INT_W+KEEP_FRAC-1:0] x8_d1; // 將 Stage 3 算出的 x8 延遲一拍，與 Stage 4 的 x14 同步輸出
+    // --- 延遲對齊鏈 ---
+    reg signed [INT_W+KEEP_FRAC-1:0] x1_d1, x1_d2, x1_d3; // 用於計算 x7
+    reg signed [INT_W+KEEP_FRAC-1:0] x2_d1;               // 用於 Stage 3 計算 x6
+    reg signed [INT_W+KEEP_FRAC-1:0] x8_d1;               // 用於 Stage 4 輸出對齊
+    reg signed [INT_W+KEEP_FRAC-1:0] x7_d1;               // 為了讓 x7 延遲一拍
 
-    always @(posedge clk) begin
+    always @(posedge clk or posedge rst) begin
         if (rst) begin
-            x2_d1 <= 0;
-            x8_d1 <= 0;
+            x1_d1 <= 0; x1_d2 <= 0; x1_d3 <= 0;
+            x2_d1 <= 0; x8_d1 <= 0; x7_d1 <= 0;
         end else begin
-            x2_d1 <= x2;     // 用於 Stage 3 計算 x6
-            x8_d1 <= x8;     // 用於與 x14 對齊輸出
+            // 延遲原始輸入，提供給 Stage 4 計算 x^7 (x^6 * x^1)
+            x1_d1 <= x1_in;
+            x1_d2 <= x1_d1;
+            x1_d3 <= x1_d2; 
+
+            x2_d1 <= x2;    // 用於 Stage 3 計算 x^6 = x^4 * x^2
+            x8_d1 <= x8;    // 使 x8 與 x14 同步在第 4 拍輸出
+            x7_d1 <= x7;    // 使 x7 在第 5 拍輸出 (比其他兩個晚一拍)
         end
     end
 
-    // --- 運算單元 ---
+    // --- 運算單元：嚴格執行參數傳遞 ---
 
-    // Stage 1: x^2 = x * x (Latency: 1)
-    signed_mul_trunc #(.KEEP_FRAC(KEEP_FRAC)) u_mul_x2 (
-        .clk(clk), .a_i(x1_in), .b_i(x1_in), .out_o(x2)
+    // Stage 1: x^2 = x^1 * x^1 (Latency: 1)
+    signed_mul_trunc #(
+        .INT_W(INT_W), .FRAC_W(KEEP_FRAC), .KEEP_FRAC(KEEP_FRAC)
+    ) u_mul_x2 (
+        .clk(clk), .a_i(x1_in), .b_i(x1_in), .out_o(x2), .rst(rst)
     );
 
     // Stage 2: x^4 = x^2 * x^2 (Latency: 2)
-    signed_mul_trunc #(.KEEP_FRAC(KEEP_FRAC)) u_mul_x4 (
-        .clk(clk), .a_i(x2), .b_i(x2), .out_o(x4)
+    signed_mul_trunc #(
+        .INT_W(INT_W), .FRAC_W(KEEP_FRAC), .KEEP_FRAC(KEEP_FRAC)
+    ) u_mul_x4 (
+        .clk(clk), .a_i(x2), .b_i(x2), .out_o(x4), .rst(rst)
     );
 
-    // Stage 3: (Latency: 3)
+    // Stage 3: x^8 和 x^6 (Latency: 3)
     // x^8 = x^4 * x^4
-    signed_mul_trunc #(.KEEP_FRAC(KEEP_FRAC)) u_mul_x8 (
-        .clk(clk), .a_i(x4), .b_i(x4), .out_o(x8)
+    signed_mul_trunc #(.INT_W(INT_W), .FRAC_W(KEEP_FRAC), .KEEP_FRAC(KEEP_FRAC)) u_mul_x8 (
+        .clk(clk), .a_i(x4), .b_i(x4), .out_o(x8), .rst(rst)
     );
-    // x^6 = x^4 * x^2 (需用 x2_d1 對齊 x4)
-    signed_mul_trunc #(.KEEP_FRAC(KEEP_FRAC)) u_mul_x6 (
-        .clk(clk), .a_i(x4), .b_i(x2_d1), .out_o(x6)
-    );
-
-    // Stage 4: x^14 = x^8 * x^6 (Latency: 4)
-    // 這裡直接使用 Stage 3 剛算出的 x8 與 x6
-    signed_mul_trunc #(.KEEP_FRAC(KEEP_FRAC)) u_mul_x14 (
-        .clk(clk), .a_i(x8), .b_i(x6), .out_o(x14)
+    // x^6 = x^4 * x^2_d1 (這裡 x2 需要延遲一拍跟 x4 對齊)
+    signed_mul_trunc #(.INT_W(INT_W), .FRAC_W(KEEP_FRAC), .KEEP_FRAC(KEEP_FRAC)) u_mul_x6 (
+        .clk(clk), .a_i(x4), .b_i(x2_d1), .out_o(x6), .rst(rst)
     );
 
-    // --- 輸出截斷與對齊 ---
-    // x8_o 使用延遲過的 x8_d1，確保與 x14 同時在輸入 4 拍後出現
-    assign x8_o  = x8_d1 >>> (KEEP_FRAC - FRAC_W);
-    assign x14_o = x14    >>> (KEEP_FRAC - FRAC_W);
+    // Stage 4: x^14 和 x^7 (Latency: 4)
+    // x^14 = x^8 * x^6
+    signed_mul_trunc #(.INT_W(INT_W), .FRAC_W(KEEP_FRAC), .KEEP_FRAC(KEEP_FRAC)) u_mul_x14 (
+        .clk(clk), .a_i(x8), .b_i(x6), .out_o(x14), .rst(rst)
+    );
+    // x^7 = x^6 * x^1_d3 (x1 延遲三拍後跟 x6 對齊)
+    signed_mul_trunc #(.INT_W(INT_W), .FRAC_W(KEEP_FRAC), .KEEP_FRAC(KEEP_FRAC)) u_mul_x7 (
+        .clk(clk), .a_i(x6), .b_i(x1_d3), .out_o(x7), .rst(rst)
+    );
+
+    // --- 輸出截斷回 FRAC_W (Q4.12) ---
+    // x8, x14 輸出拍數：4
+    // x7 輸出拍數：5 (經過 x7_d1)
+    assign x8_o  = x8_d1 >>> (KEEP_FRAC - FRAC_W); 
+    assign x14_o = x14   >>> (KEEP_FRAC - FRAC_W);
+    assign x7_o  = x7_d1 >>> (KEEP_FRAC - FRAC_W);
 
 endmodule
 

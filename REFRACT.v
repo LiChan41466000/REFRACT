@@ -60,16 +60,12 @@ wire signed [15:0] x_normalized, y_normalized;
 coord_processor u_x_proc (.coord_i(cnt_x), .out_o(x_normalized));
 coord_processor u_y_proc (.coord_i(cnt_y), .out_o(y_normalized));
 
-wire [3:0] x_d7, y_d8,y_d7, x_d8,x_d6,y_d6; //buf座標
+wire [3:0] x_d6,y_d6; //buf座標
 COORD_DELAY coord_delay_inst (
     .clk(CLK),
     .rst(RST),
     .x_i(cnt_x),
     .y_i(cnt_y),
-    .x_d7(x_d7),
-    .y_d7(y_d7),
-    .x_d8(x_d8),
-    .y_d8(y_d8),
     .x_d6(x_d6),
     .y_d6(y_d6)
 );
@@ -147,24 +143,22 @@ end
 // 現在 g2_d1 與 eta2A 都是針對同一個座標點的運算結果
 // --- Step 1: kgg 縮減 (48-bit Q20.28 -> 32-bit Q12.20) ---
 wire [47:0] kgg_full = ({24'd0, g2_d1} << 16) - eta2A;
-wire [31:0] kgg_32   = kgg_full[39:8]; // 截掉低 8 位小數與高 8 位整數
 
-localparam width_32 = 32;
-localparam tc_mode  = 0;
-reg  [31:0] kgg_reg; 
+wire [23:0] kgg_24 = kgg_full[31:8]; 
 
+reg [23:0] kgg_reg_24;
 always @(posedge CLK or posedge RST) begin
-     if(RST) kgg_reg <= 32'd0;
-     else    kgg_reg <= kgg_32;
+     if(RST) kgg_reg_24 <= 24'd0;
+     else    kgg_reg_24 <= kgg_24;
 end
 
-// DW_sqrt 輸出：輸入 32-bit (Q12.20) -> 輸出 16-bit (Q6.10)
-wire [15:0] sqrt_kgg_short; 
+// DW_sqrt 輸出：輸入 24-bit (Q4.20) -> 輸出 12-bit (Q2.10)
+wire [11:0] sqrt_kgg_24; 
 
-DW_sqrt #(width_32, tc_mode) 
+DW_sqrt #(24, 0) 
     DW_sqrt_inst (
-        .a(kgg_reg),
-        .root(sqrt_kgg_short)
+        .a(kgg_reg_24),
+        .root(sqrt_kgg_24)
     );
 //Z
 reg signed [16:0] z; //Q5.12
@@ -204,10 +198,9 @@ end
 
 //M
 
-// 重新定義分母與分子，確保小數點對齊在第 14 位 (Q12.14)
-wire signed [25:0] numerator   = ($signed({10'd0, eta}) << 2) - ($signed({10'd0, sqrt_kgg_short}) << 4); 
-wire signed [25:0] denominator = ($signed({10'd0, etaA_buf}) << 2) + ($signed({10'd0, sqrt_kgg_short}) << 4);
 
+wire signed [25:0] numerator   = ($signed({10'd0, eta}) << 2) - ($signed({10'd0, sqrt_kgg_24}) << 4); 
+wire signed [25:0] denominator = ($signed({10'd0, etaA_buf}) << 2) + ($signed({10'd0, sqrt_kgg_24}) << 4);
 // --- Step 3: M 計算 (維持 Q15.12) ---
 reg signed [26:0] M; 
 // =========================================================================
@@ -354,23 +347,19 @@ module COORD_DELAY (
     input  wire       clk,
     input  wire       rst,
     input  wire [3:0] x_i,     // 來自 COUNTER_XY 的 cnt_x [cite: 68]
-    input  wire [3:0] y_i,     // 來自 COUNTER_XY 的 cnt_y [cite: 68]
-    output wire [3:0] x_d7,  // 延遲 10 拍後的 X
-    output wire [3:0] y_d7,  // 延遲 10 拍後的 X
-    output wire [3:0] x_d8,  // 延遲 10 拍後的 Y
-    output wire [3:0] y_d8,  // 延遲 10 拍後的 Y
+    input  wire [3:0] y_i,     // 來自 COUNTER_XY 的 cnt_y [cite: 68] 
     output wire [3:0] x_d6,
     output wire [3:0] y_d6
 );
 
     // 建立 10 階的陣列暫存器
-    reg [3:0] x_pipe [0:8];
-    reg [3:0] y_pipe [0:8];
+    reg [3:0] x_pipe [0:6];
+    reg [3:0] y_pipe [0:6];
     integer i;
 
     always @(posedge clk or posedge rst) begin
         if (rst) begin
-            for (i = 0; i <= 8; i = i + 1) begin
+            for (i = 0; i <= 6; i = i + 1) begin
                 x_pipe[i] <= 4'd0;
                 y_pipe[i] <= 4'd0;
             end
@@ -380,7 +369,7 @@ module COORD_DELAY (
             y_pipe[0] <= y_i;
             
             // 後續每一階接前一階 (Shift Logic)
-            for (i = 1; i <= 8; i = i + 1) begin
+            for (i = 1; i <= 6; i = i + 1) begin
                 x_pipe[i] <= x_pipe[i-1];
                 y_pipe[i] <= y_pipe[i-1];
             end
@@ -390,10 +379,6 @@ module COORD_DELAY (
     // 輸出最後一階
     assign x_d6 = x_pipe[6];
     assign y_d6 = y_pipe[6];
-    assign x_d7 = x_pipe[7];
-    assign y_d7 = y_pipe[7];
-    assign x_d8 = x_pipe[8];
-    assign y_d8 = y_pipe[8];
 
 endmodule
 

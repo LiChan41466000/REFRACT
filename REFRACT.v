@@ -102,37 +102,6 @@ power_8_14_pipelined power_Y (
     .x8_o(y8) 
 );
 
-//reg signed [15:0] x_norm_d1, x_norm_d2, x_norm_d3, x_norm_d4;
-
-//always @(posedge CLK or posedge RST) begin
-//    if (RST) begin
-//        x_norm_d1 <= 16'd0;
-//        x_norm_d2 <= 16'd0;
-//        x_norm_d3 <= 16'd0;
-//        x_norm_d4 <= 16'd0;
-//    end else begin
-//        x_norm_d1 <= x_normalized; // 延遲 1 拍
-//        x_norm_d2 <= x_norm_d1;     // 延遲 2 拍
-//        x_norm_d3 <= x_norm_d2;     // 延遲 3 拍
-//        x_norm_d4 <= x_norm_d3;     // 延遲 4 拍
-//    end
-//end
-//reg signed [15:0] y_norm_d1, y_norm_d2, y_norm_d3, y_norm_d4;
-//always @(posedge CLK or posedge RST) begin
-//    if (RST) begin
-//        y_norm_d1 <= 16'd0;
-//        y_norm_d2 <= 16'd0;
-//        y_norm_d3 <= 16'd0;
-//        y_norm_d4 <= 16'd0;
-//    end else begin
-//        y_norm_d1 <= y_normalized; // 延遲 1 拍
-//        y_norm_d2 <= y_norm_d1;     // 延遲 2 拍
-//        y_norm_d3 <= y_norm_d2;     // 延遲 3 拍
-//        y_norm_d4 <= y_norm_d3;     // 延遲 4 拍
-//    end
-//end
-// 此時 x_norm_d4 會與 power_X 輸出的 x8_o, x14_o 同步
-
 
 // 建議定義：整數 4 bits + 小數 12 bits = 16 bits 基礎，但計算中擴展至 24 bits Q12.12
 wire [23:0] gx2 = {8'd0, x14} << 2; // gx^2 = 4 * x^14
@@ -203,19 +172,6 @@ always @(posedge CLK or posedge RST) begin
 end
 
 
-//x7 y7 
-//reg signed [15:0] y7;
-//reg signed [15:0] x7;
-//always @(posedge CLK or posedge RST) begin
-//    if(RST) begin
-//        x7 <= 16'd0;
-//        y7 <= 16'd0;
-//    end else begin
-//        x7 <= (|x_norm_d4)?({12'd0,x8} << 12) / x_norm_d4: ; // Q5.12 * Q4.12 = Q9.12
-//        y7 <= (|y_norm_d4)?({12'd0,y8} << 12) / y_norm_d4: ; // Q5.12 * Q4.12 = Q9.12
-//    end
-//end
-
 //Z乘上gx gy/有改!!!!!!!!!
 reg [32:0] z_gx; //Q5.12 * Q4.12 = Q10.24
 reg [32:0] z_gy; //Q5.12 * Q4.12 = Q10.24 
@@ -264,19 +220,6 @@ end
 
 
 /*
-// ZX ZY
-
-always @(posedge CLK or posedge RST) begin
-    if(RST) begin
-        zx <= 0;
-        zy <= 0;
-    end
-    else begin
-        zx <= ($signed({68'd0, x_d6}) << 36) + $signed(M * z_gx_buf);
-        zy <= ($signed({68'd0, y_d6}) << 36) + $signed(M * z_gy_buf); 
-    end
-end
-*/
 reg signed [71:0] zx,zy; //Q36.36
 reg signed [32:0] z_gx_signed,z_gy_signed; 
 always @(*) z_gx_signed = $signed(z_gx_buf);
@@ -301,6 +244,40 @@ end
 wire [15:0] zx_out = zx[39:24]; // 將 zx 從 Q28.48 對齊回 Q4.12
 wire [15:0] zy_out = zy[39:24]; // 將 zy 從 Q28.48 對齊回 Q4.12
 reg  [15:0] zy_out_buf; // 將 zy 從 Q28.48 對齊回 Q4.12
+*/
+// --- 優化 1：縮減暫存器位寬 ---
+// 格式：整數 8 bits + 小數 24 bits = 32 bits (Q8.24)
+// 這能節省超過 50% 的 FF 面積
+reg signed [31:0] zx, zy; 
+
+// --- 優化 2：乘法結果直接截斷 ---
+// M (Q15.12) * z_gx (Q10.24) = Q25.36 (60 bits)
+// 我們只需要對齊到 Q8.24，所以右移 12 位 (36 - 24 = 12)
+wire signed [59:0] full_p_x = $signed(M) * $signed(z_gx_buf);
+wire signed [59:0] full_p_y = $signed(M) * $signed(z_gy_buf);
+
+// 截斷到 32 bit 以供後續加法，保留一點整數空間防止溢位
+wire signed [31:0] offset_x = full_p_x >>> 12; 
+wire signed [31:0] offset_y = full_p_y >>> 12;
+
+always @(posedge CLK or posedge RST) begin
+    if(RST) begin
+        zx <= 32'd0;
+        zy <= 32'd0;
+    end else begin
+        // x_d6 是整數，對齊到 Q8.24 需要左移 24 位
+        // 這樣加法器從 72-bit 變成 32-bit，速度更快、面積更小
+        zx <= ($signed({28'd0, x_d6}) << 24) + offset_x;
+        zy <= ($signed({28'd0, y_d6}) << 24) + offset_y;
+    end
+end
+
+// --- 優化 3：對應的輸出選取 ---
+// 因為現在 zx 是 Q8.24，要拿 Q4.12：
+// 小數點在第 24 位，所以取 [24+3 : 24-12] = [27 : 12]
+wire [15:0] zx_out = zx[27:12]; 
+wire [15:0] zy_out = zy[27:12];
+reg  [15:0] zy_out_buf; // 將 zy 從 Q28.48 對齊回 Q4.12
 
 always @(posedge CLK or posedge RST) begin
         if(RST) begin
@@ -310,6 +287,7 @@ always @(posedge CLK or posedge RST) begin
         zy_out_buf <= zy_out;
     end
 end
+
 
 assign SRAM_D = (CALC_DONE)?zx_out:zy_out_buf;
 

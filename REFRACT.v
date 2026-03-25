@@ -6,21 +6,29 @@ module REFRACT(
     input  wire        CLK,
     input  wire        RST,
     input  wire [3:0]  RI,   
-    output reg  [8:0]  SRAM_A,
-    output reg  [15:0] SRAM_D,
-    input  wire [15:0] SRAM_Q,   // unused
-    output reg         SRAM_WE,
-    output reg         DONE
+    output  [8:0]  SRAM_A,
+    output   [15:0] SRAM_D,
+    input  [15:0] SRAM_Q,   // unused
+    output         SRAM_WE,
+    output         DONE
 );
 
 wire  [3:0]  cnt_x;
 wire  [3:0]  cnt_y;
+wire CALC_DONE;
 COUNTER_XY counter_inst (
     .CLK(CLK),
     .RST(RST),
     .cnt_x(cnt_x),
     .cnt_y(cnt_y),
-    .CALC_DONE(CALC_DONE)
+    .CALC_DONE(CALC_DONE),
+    .finish(DONE)
+);
+
+COUNTER_ONE_SHOT counter_one_shot_inst (
+    .CLK(CLK),
+    .RST(RST),
+    .ONE_SHOT_OUT(CALC_DONE)
 );
 
 wire signed [15:0] x_normalized, y_normalized;
@@ -28,8 +36,22 @@ wire signed [15:0] x_normalized, y_normalized;
 coord_processor u_x_proc (.coord_i(cnt_x), .out_o(x_normalized));
 coord_processor u_y_proc (.coord_i(cnt_y), .out_o(y_normalized));
 
+wire [3:0] x_d7, y_d8,x_d6,y_d6; //buf座標
+COORD_DELAY coord_delay_inst (
+    .clk(CLK),
+    .rst(RST),
+    .x_i(cnt_x),
+    .y_i(cnt_y),
+    .x_d7(x_d7),
+    .y_d8(y_d8),
+    .x_d6(x_d6),
+    .y_d6(y_d6)
+);
+
+
+
 wire [15:0] eta; //1/RI
-RI_LUT ri_lut_inst (
+RI ri_inst (
     .ri_i(RI),
     .eta_o(eta)
 );
@@ -53,6 +75,38 @@ power_8_14_pipelined power_Y (
     .x8_o(y8) 
 );
 
+reg signed [15:0] x_norm_d1, x_norm_d2, x_norm_d3, x_norm_d4;
+
+always @(posedge CLK or posedge RST) begin
+    if (RST) begin
+        x_norm_d1 <= 16'd0;
+        x_norm_d2 <= 16'd0;
+        x_norm_d3 <= 16'd0;
+        x_norm_d4 <= 16'd0;
+    end else begin
+        x_norm_d1 <= x_normalized; // 延遲 1 拍
+        x_norm_d2 <= x_norm_d1;     // 延遲 2 拍
+        x_norm_d3 <= x_norm_d2;     // 延遲 3 拍
+        x_norm_d4 <= x_norm_d3;     // 延遲 4 拍
+    end
+end
+reg signed [15:0] y_norm_d1, y_norm_d2, y_norm_d3, y_norm_d4;
+always @(posedge CLK or posedge RST) begin
+    if (RST) begin
+        y_norm_d1 <= 16'd0;
+        y_norm_d2 <= 16'd0;
+        y_norm_d3 <= 16'd0;
+        y_norm_d4 <= 16'd0;
+    end else begin
+        y_norm_d1 <= y_normalized; // 延遲 1 拍
+        y_norm_d2 <= y_norm_d1;     // 延遲 2 拍
+        y_norm_d3 <= y_norm_d2;     // 延遲 3 拍
+        y_norm_d4 <= y_norm_d3;     // 延遲 4 拍
+    end
+end
+// 此時 x_norm_d4 會與 power_X 輸出的 x8_o, x14_o 同步
+
+
 // 建議定義：整數 4 bits + 小數 12 bits = 16 bits 基礎，但計算中擴展至 24 bits Q12.12
 wire [23:0] gx2 = {8'd0, x14} << 2; // gx^2 = 4 * x^14
 wire [23:0] gy2 = {8'd0, y14} << 2; // gy^2 = 4 * y^14
@@ -68,34 +122,172 @@ wire [23:0] eta2 = (eta * eta) >>> 8;
 //eta2A
 reg [47:0] eta2A; //eta平方乘上A
 reg [27:0] etaA; //eta乘上A
+reg [27:0] etaA_buf; //eta乘上A
 
 always @(posedge CLK or posedge RST) begin
-    if(RST)
+    if(RST) begin
         eta2A <= 0;
         etaA <= 0;
-    else
+    end
+    else begin
         eta2A <= (eta2 * g2_minus1) ; // eta * g2 後再右移 12 位元對齊小數部分 Q20.28
         etaA <= (eta * g2_minus1) >>> 12 ; // eta * g2 後再右移 12 位元對齊小數部分 Q15.12
+        etaA_buf <= etaA; // 將 etaA 的值暫存一拍，提供給下一個時鐘週期使用
+    end
 end
 
-wire [47:0] kgg_q28 = ({24'd0, g2} << 16) - eta2A; //Q20.28
+
+
+wire [47:0] kgg = ({24'd0, g2} << 16) - eta2A; //Q20.28
+
+localparam width = 48;
+localparam tc_mode = 0;
+reg  [47:0] kgg_reg; 
+always @(posedge CLK or posedge RST) begin
+     if(RST)
+        kgg_reg <= 48'd0;
+     else
+        kgg_reg <= kgg;
+end
+wire [23:0] sqrt_kgg;//Q10.14
 
 DW_sqrt #(width,tc_mode) 
-        (.a(),
-         .root());
+    DW_sqrt_inst   (.a(kgg_reg),
+                    .root(sqrt_kgg));
+
+//Z
+reg [16:0] z; //Q5.12
+always @(posedge CLK or posedge RST) begin
+    if(RST)
+        z <= 17'd0;
+    else
+        z <= 17'd6 - ({1'd0, x8} << 1) - ({1'd0, y8} << 1) ; 
+end
 
 
+//x7 y7 
+reg signed [15:0] y7;
+reg signed [15:0] x7;
+always @(posedge CLK or posedge RST) begin
+    if(RST) begin
+        x7 <= 16'd0;
+        y7 <= 16'd0;
+    end else begin
+        x7 <= ({12'd0,x8} << 12) / x_norm_d4; // Q5.12 * Q4.12 = Q9.12
+        y7 <= ({12'd0,y8} << 12) / y_norm_d4; // Q5.12 * Q4.12 = Q9.12
+    end
+end
+
+//Z乘上gx gy
+reg [31:0] z_gx; //Q5.12 * Q4.12 = Q9.24
+reg [31:0] z_gy; //Q5.12 * Q4.12 = Q9.24
+always @(posedge CLK or posedge RST) begin
+    if(RST) begin
+        z_gx <= 0;
+        z_gy <= 0;
+    end else begin
+        z_gx <= z * x7; // Q5.12 * Q4.12 = Q9.24
+        z_gy <= z * y7; // Q5.12 * Q4.12 = Q9.24
+    end
+end
+
+//M
+reg [26:0] M;
+always @(posedge CLK or posedge RST) begin
+    if(RST) begin
+        M <= 0;
+    end
+    else begin
+        M <= (eta-sqrt_kgg) / (etaA_buf + sqrt_kgg); //Q15.12 / Q15.12 = Q15.12
+    end
+end
+
+
+
+// ZX ZY
+reg [72:0] zx,zy; //Q28.48
+always @(posedge CLK or posedge RST) begin
+    if(RST) begin
+        zx <= 0;
+        zy <= 0;
+    end
+    else begin
+        zx <= ( {24'd0,x_d6}<<24 + M * z_gx); // 4.36+ Q15.12 * Q9.24 = Q25.48
+        zy <= ( {24'd0,y_d6}<<24 + M * z_gy); 
+    end
+end
+
+wire [15:0] zx_out = zx[39:24]; // 將 zx 從 Q28.48 對齊回 Q4.12
+wire [15:0] zy_out = zy[39:24]; // 將 zy 從 Q28.48 對齊回 Q4.12
+reg  [15:0] zy_out_buf; // 將 zy 從 Q28.48 對齊回 Q4.12
+
+always @(posedge CLK or posedge RST) begin
+        if(RST) begin
+        zy_out_buf <= 0;
+    end
+    else begin
+        zy_out_buf <= zy_out;
+    end
+end
+
+assign SRAM_D = (CALC_DONE)?zx_out:zy_out_buf;
+
+assign SRAM_WE = 1'd1; // 持續寫入，SRAM 模組內部會根據地址決定是否真正寫入
+
+assign SRAM_A = (x_d7+ y_d8*16)*2 + CALC_DONE ; // 寫入 zx 時使用 x_d7, y_d8；寫入 zy 時使用 x_d6, y_d6
 
 endmodule
 
+module COORD_DELAY (
+    input  wire       clk,
+    input  wire       rst,
+    input  wire [3:0] x_i,     // 來自 COUNTER_XY 的 cnt_x [cite: 68]
+    input  wire [3:0] y_i,     // 來自 COUNTER_XY 的 cnt_y [cite: 68]
+    output wire [3:0] x_d7,  // 延遲 10 拍後的 X
+    output wire [3:0] y_d8,  // 延遲 10 拍後的 Y
+    output wire [3:0] x_d6,
+    output wire [3:0] y_d6
+);
 
+    // 建立 10 階的陣列暫存器
+    reg [3:0] x_pipe [0:8];
+    reg [3:0] y_pipe [0:8];
+    integer i;
+
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            for (i = 0; i < 8; i = i + 1) begin
+                x_pipe[i] <= 4'd0;
+                y_pipe[i] <= 4'd0;
+            end
+        end else begin
+            // 第一階接輸入
+            x_pipe[0] <= x_i;
+            y_pipe[0] <= y_i;
+            
+            // 後續每一階接前一階 (Shift Logic)
+            for (i = 1; i < 8; i = i + 1) begin
+                x_pipe[i] <= x_pipe[i-1];
+                y_pipe[i] <= y_pipe[i-1];
+            end
+        end
+    end
+
+    // 輸出最後一階
+    assign x_d6 = x_pipe[6];
+    assign y_d6 = y_pipe[6];
+    assign x_d7 = x_pipe[7];
+    assign y_d8 = y_pipe[8];
+
+endmodule
 
 module COUNTER_XY(
     input          CLK,
     input          RST,
     output reg  [3:0]  cnt_x,
     output reg  [3:0]  cnt_y,
-    input          CALC_DONE
+    input          CALC_DONE,
+    output reg         finish
 );
 
 reg [3:0] cnt_x, cnt_y; // 4-bit 可以跑 0~15
@@ -105,11 +297,18 @@ always @(posedge CLK or posedge RST) begin
     if (RST) begin
         cnt_x <= 4'd0;
         cnt_y <= 4'd0;
-    end else if (CALC_DONE) begin
+        finish <= 1'b0;
+    end else if (~CALC_DONE) begin
         if (cnt_x == 4'd15) begin
+            if (cnt_y == 4'd15) begin
+                finish <= 1'b1; // 全部計算完成
+            end
+            else begin
             cnt_x <= 4'd0;
             cnt_y <= cnt_y + 4'd1;
-        end else begin
+            end
+        end 
+        else begin
             cnt_x <= cnt_x + 4'd1;
         end
     end
@@ -117,30 +316,56 @@ end
 
 endmodule
 
-module RI_LUT (
-    input  wire [3:0]  ri_i,   
-    output reg  [15:0] eta_o   // 輸出 eta = 1/RI (Q4.12 格式) [cite: 147, 159]
+module COUNTER_ONE_SHOT(
+    input          CLK,
+    input          RST,
+    output reg     ONE_SHOT_OUT
 );
 
-    always @(*) begin
-        case (ri_i)
-            4'd2 : eta_o = 16'h0800;
-            4'd3 : eta_o = 16'h0555;
-            4'd4 : eta_o = 16'h0400;
-            4'd5 : eta_o = 16'h0333;
-            4'd6 : eta_o = 16'h02AB;
-            4'd7 : eta_o = 16'h0249;
-            4'd8 : eta_o = 16'h0200;
-            4'd9 : eta_o = 16'h01C7;
-            4'd10: eta_o = 16'h019A;
-            4'd11: eta_o = 16'h0174;
-            4'd12: eta_o = 16'h0155;
-            4'd13: eta_o = 16'h013B;
-            4'd14: eta_o = 16'h0125;
-            4'd15: eta_o = 16'h0111;
-            default: eta_o = 16'h0000;
-        endcase
+ always @(posedge CLK or posedge RST) begin
+    if(RST) begin
+        ONE_SHOT_OUT <= 1'b0;
+    end else begin
+        ONE_SHOT_OUT <= ONE_SHOT_OUT+1'b1; // 在第一個時鐘週期後持續輸出高電位
     end
+ end
+
+
+endmodule
+
+
+module RI (
+    input  wire [7:0]  ri_i,   // 除數
+    output wire [15:0] eta_o   // 輸出 eta = (1<<12) / ri_i
+);
+
+    // 定義中間變數，手動展開除法步驟 (12階，因為是 Q4.12)
+    reg [19:0] remainder;
+    reg [15:0] quotient;
+    integer i;
+
+    always @(*) begin
+        // 初始化：被除數是 1.0 (Q4.12 格式即 2^12 = 4096)
+        // 我們從高位開始遞推
+        remainder = 20'd4096; 
+        quotient = 16'd0;
+
+        if (ri_i == 8'd0) begin
+            quotient = 16'hFFFF; // 處理除以 0
+        end else begin
+            // 組合邏輯迴圈：這在合成時會被展開成多級加法器/減法器
+            for (i = 15; i >= 0; i = i - 1) begin
+                if (remainder >= (ri_i << i)) begin
+                    remainder = remainder - (ri_i << i);
+                    quotient[i] = 1'b1;
+                end else begin
+                    quotient[i] = 1'b0;
+                end
+            end
+        end
+    end
+
+    assign eta_o = quotient;
 
 endmodule
 
@@ -259,32 +484,3 @@ module power_8_14_pipelined #(
 
 endmodule
 
-
-module DW_div_pipe_inst(inst_clk, inst_rst_n, inst_en, inst_a, inst_b,
-                        quotient_inst, remainder_inst, divide_by_0_inst );
-
-  parameter inst_a_width = 21;
-  parameter inst_b_width = 21;
-  parameter inst_tc_mode = 0;
-  parameter inst_rem_mode = 1;
-  parameter inst_num_stages = 4;
-  parameter inst_stall_mode = 0;
-  parameter inst_rst_mode = 1;
-  parameter inst_op_iso_mode = 0;
-
-  input inst_clk;
-  input inst_rst_n;
-  input inst_en;
-  input [inst_a_width-1 : 0] inst_a;
-  input [inst_b_width-1 : 0] inst_b;
-  output [inst_a_width-1 : 0] quotient_inst;
-  output [inst_b_width-1 : 0] remainder_inst;
-  output divide_by_0_inst;
-
-  // Instance of DW_div_pipe
-  DW_div_pipe #(inst_a_width,    inst_b_width,    inst_tc_mode,  inst_rem_mode,
-                inst_num_stages, inst_stall_mode, inst_rst_mode, inst_op_iso_mode) 
-    U1 (.clk(inst_clk), .rst_n(inst_rst_n), .en(inst_en),
-        .a(inst_a), .b(inst_b), .quotient(quotient_inst),
-        .remainder(remainder_inst), .divide_by_0(divide_by_0_inst) );
-endmodule

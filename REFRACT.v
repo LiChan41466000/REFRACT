@@ -144,24 +144,27 @@ end
 
 // 修改後的 kgg 計算
 // 現在 g2_d1 與 eta2A 都是針對同一個座標點的運算結果
-wire [47:0] kgg = ({24'd0, g2_d1} << 16) - eta2A;
+// --- Step 1: kgg 縮減 (48-bit Q20.28 -> 32-bit Q12.20) ---
+wire [47:0] kgg_full = ({24'd0, g2_d1} << 16) - eta2A;
+wire [31:0] kgg_32   = kgg_full[39:8]; // 截掉低 8 位小數與高 8 位整數
 
+localparam width_32 = 32;
+localparam tc_mode  = 0;
+reg  [31:0] kgg_reg; 
 
-localparam width = 48;
-localparam tc_mode = 0;
-reg  [47:0] kgg_reg; 
 always @(posedge CLK or posedge RST) begin
-     if(RST)
-        kgg_reg <= 48'd0;
-     else
-        kgg_reg <= kgg;
+     if(RST) kgg_reg <= 32'd0;
+     else    kgg_reg <= kgg_32;
 end
-wire [23:0] sqrt_kgg;//Q10.14
 
-DW_sqrt #(width,tc_mode) 
-    DW_sqrt_inst   (.a(kgg_reg),
-                    .root(sqrt_kgg));
+// DW_sqrt 輸出：輸入 32-bit (Q12.20) -> 輸出 16-bit (Q6.10)
+wire [15:0] sqrt_kgg_short; 
 
+DW_sqrt #(width_32, tc_mode) 
+    DW_sqrt_inst (
+        .a(kgg_reg),
+        .root(sqrt_kgg_short)
+    );
 //Z
 reg signed [16:0] z; //Q5.12
 always @(posedge CLK or posedge RST) begin
@@ -172,7 +175,7 @@ always @(posedge CLK or posedge RST) begin
 end
 
 
-//Z乘上gx gy/有改!!!!!!!!!
+//Z乘上gx gy
 reg [32:0] z_gx; //Q5.12 * Q4.12 = Q10.24
 reg [32:0] z_gy; //Q5.12 * Q4.12 = Q10.24 
 reg [32:0] z_gx_buf; //Q5.12 * Q4.12 = Q10.24
@@ -200,63 +203,28 @@ end
 //M
 
 // 重新定義分母與分子，確保小數點對齊在第 14 位 (Q12.14)
-wire signed [25:0] numerator   = ($signed({10'd0, eta}) << 2) - $signed({2'd0, sqrt_kgg}); 
-wire signed [25:0] denominator = ($signed({10'd0, etaA_buf}) << 2) + $signed({2'd0, sqrt_kgg});
+wire signed [25:0] numerator   = ($signed({10'd0, eta}) << 2) - ($signed({10'd0, sqrt_kgg_short}) << 4); 
+wire signed [25:0] denominator = ($signed({10'd0, etaA_buf}) << 2) + ($signed({10'd0, sqrt_kgg_short}) << 4);
 
-
-
-// 將 M 宣告為具符號 (signed)，且擴大運算中間寬度
+// --- Step 3: M 計算 (維持 Q15.12) ---
 reg signed [26:0] M; 
 always @(posedge CLK or posedge RST) begin
     if(RST) M <= 0;
     else begin
         if (denominator != 0)
-            // 強制使用 $signed 並擴展到 40 bit 進行運算，再存回 27 bit
             M <= ($signed({ {14{numerator[25]}}, numerator}) <<< 12) / $signed(denominator);
         else
             M <= 0;
     end
 end
 
-
-/*
-reg signed [71:0] zx,zy; //Q36.36
-reg signed [32:0] z_gx_signed,z_gy_signed; 
-always @(*) z_gx_signed = $signed(z_gx_buf);
-always @(*) z_gy_signed = $signed(z_gy_buf);
-
-wire signed [59:0] product_x = $signed(M) * z_gx_signed; // Q25.36
-wire signed [59:0] product_y = $signed(M) * z_gy_signed; // Q25.36
-
-always @(posedge CLK or posedge RST) begin
-    if(RST) begin
-        zx <= 72'd0;
-        zy <= 72'd0;
-    end else begin
-        // 正確的對齊與加法：
-        // 將 4-bit 的 x_d6 先轉成 signed 72-bit，再位移
-        // 這樣能確保整數部分位在 Bit [39:36]
-        zx <= ( $signed({68'd0, x_d6}) << 36 ) + $signed({ {12{product_x[59]}}, product_x });
-        zy <= ( $signed({68'd0, y_d6}) << 36 ) + $signed({ {12{product_y[59]}}, product_y });
-    end
-end
-
-wire [15:0] zx_out = zx[39:24]; // 將 zx 從 Q28.48 對齊回 Q4.12
-wire [15:0] zy_out = zy[39:24]; // 將 zy 從 Q28.48 對齊回 Q4.12
-reg  [15:0] zy_out_buf; // 將 zy 從 Q28.48 對齊回 Q4.12
-*/
-// --- 優化 1：縮減暫存器位寬 ---
-// 格式：整數 8 bits + 小數 24 bits = 32 bits (Q8.24)
-// 這能節省超過 50% 的 FF 面積
 reg signed [31:0] zx, zy; 
 
-// --- 優化 2：乘法結果直接截斷 ---
-// M (Q15.12) * z_gx (Q10.24) = Q25.36 (60 bits)
-// 我們只需要對齊到 Q8.24，所以右移 12 位 (36 - 24 = 12)
+// M(Q15.12) * z_gx(Q10.24) = Q25.36
 wire signed [59:0] full_p_x = $signed(M) * $signed(z_gx_buf);
 wire signed [59:0] full_p_y = $signed(M) * $signed(z_gy_buf);
 
-// 截斷到 32 bit 以供後續加法，保留一點整數空間防止溢位
+// 為了對齊到 Q8.24，右移 12 位 (36 - 24 = 12)
 wire signed [31:0] offset_x = full_p_x >>> 12; 
 wire signed [31:0] offset_y = full_p_y >>> 12;
 
@@ -265,16 +233,14 @@ always @(posedge CLK or posedge RST) begin
         zx <= 32'd0;
         zy <= 32'd0;
     end else begin
-        // x_d6 是整數，對齊到 Q8.24 需要左移 24 位
-        // 這樣加法器從 72-bit 變成 32-bit，速度更快、面積更小
+        // 整數座標 x_d6 左移 24 位對齊 Q8.24
         zx <= ($signed({28'd0, x_d6}) << 24) + offset_x;
         zy <= ($signed({28'd0, y_d6}) << 24) + offset_y;
     end
 end
 
-// --- 優化 3：對應的輸出選取 ---
-// 因為現在 zx 是 Q8.24，要拿 Q4.12：
-// 小數點在第 24 位，所以取 [24+3 : 24-12] = [27 : 12]
+// 輸出截取：從 Q8.24 轉回 Q4.12
+// [24+3 : 24-12] = [27:12]
 wire [15:0] zx_out = zx[27:12]; 
 wire [15:0] zy_out = zy[27:12];
 reg  [15:0] zy_out_buf; // 將 zy 從 Q28.48 對齊回 Q4.12

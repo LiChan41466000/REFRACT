@@ -476,7 +476,7 @@ endmodule
 
 
 module RI (
-    input  wire [7:0]  ri_i,   // 除數
+    input  wire [3:0]  ri_i,   // 除數
     output wire [15:0] eta_o   // 輸出 eta = (1<<12) / ri_i
 );
 
